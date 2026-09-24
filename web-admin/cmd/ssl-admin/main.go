@@ -69,6 +69,7 @@ func main() {
 	mux.HandleFunc("/api/dns", a.protected(a.dns))
 	mux.HandleFunc("/api/dns-sync", a.protected(a.syncDNS))
 	mux.HandleFunc("/api/sites", a.protected(a.sites))
+	mux.HandleFunc("/api/nginx-sync", a.protected(a.syncNginx))
 	mux.HandleFunc("/api/certificates", a.protected(a.certificates))
 	webDir := getenv("ADMIN_WEB_DIR", "./web/dist")
 	mux.Handle("/", http.FileServer(http.Dir(webDir)))
@@ -266,6 +267,10 @@ func (a *app) syncDNS(w http.ResponseWriter, r *http.Request) {
 func (a *app) sites(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if err := a.syncNginxSites(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
 		rows, err := a.db.Query("SELECT id,domain,upstream,certificate,enabled FROM sites ORDER BY id DESC")
 		if err != nil {
 			http.Error(w, err.Error(), 500)
@@ -294,22 +299,61 @@ func (a *app) sites(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"请先同步或创建该域名对应的 DNS 解析"}`, http.StatusConflict)
 			return
 		}
-		if err := a.nginx.Apply(r.Context(), x.Domain, normalizeUpstream(x.Upstream), x.Certificate); err != nil {
+		x.Upstream = normalizeUpstream(x.Upstream)
+		if err := a.nginx.Apply(r.Context(), x.Domain, x.Upstream, x.Certificate); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		res, err := a.db.Exec("INSERT INTO sites(domain,upstream,certificate) VALUES(?,?,?)", x.Domain, x.Upstream, x.Certificate)
+		_, err := a.db.Exec(`INSERT INTO sites(domain,upstream,certificate,enabled) VALUES(?,?,?,1)
+ON CONFLICT(domain) DO UPDATE SET upstream=excluded.upstream,certificate=excluded.certificate,enabled=1`, x.Domain, x.Upstream, x.Certificate)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		x.ID, _ = res.LastInsertId()
+		_ = a.db.QueryRow("SELECT id FROM sites WHERE domain=?", x.Domain).Scan(&x.ID)
 		x.Enabled = true
 		a.log("site.create", x.Domain)
 		writeJSON(w, x)
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+func (a *app) syncNginx(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if err := a.syncNginxSites(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	var count int
+	_ = a.db.QueryRow("SELECT count(*) FROM sites WHERE enabled=1").Scan(&count)
+	a.log("nginx.sync", getenv("NGINX_SITE_DIR", "/etc/nginx/conf.d"))
+	writeJSON(w, map[string]int{"count": count})
+}
+
+func (a *app) syncNginxSites() error {
+	items, err := a.nginx.List()
+	if err != nil {
+		return err
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec("UPDATE sites SET enabled=0"); err != nil {
+		return err
+	}
+	for _, item := range items {
+		if _, err = tx.Exec(`INSERT INTO sites(domain,upstream,certificate,enabled) VALUES(?,?,?,1)
+ON CONFLICT(domain) DO UPDATE SET upstream=excluded.upstream,certificate=excluded.certificate,enabled=1`, item.Domain, item.Upstream, item.Certificate); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (a *app) dnsMatchesDomain(domain string) bool {
