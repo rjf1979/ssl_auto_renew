@@ -1,0 +1,22 @@
+[Unit]
+Description=SSL Admin Web Console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/ssl-admin
+EnvironmentFile=/etc/ssl-admin/admin.env
+ExecStart=/opt/ssl-admin/ssl-admin
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ssl-admin /etc/nginx/conf.d /etc/ssl-auto-renew/certs
+
+[Install]
+WantedBy=multi-user.target

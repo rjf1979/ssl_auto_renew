@@ -1,0 +1,55 @@
+<script setup>
+import { computed, onMounted, ref } from 'vue'
+import { Activity, ArrowRight, CheckCircle2, Globe2, KeyRound, LayoutDashboard, LogOut, Plus, RefreshCw, Server, ShieldCheck, Trash2, XCircle } from 'lucide-vue-next'
+
+const authenticated = ref(false)
+const code = ref('')
+const loginError = ref('')
+const page = ref('overview')
+const loading = ref(false)
+const overview = ref({ dnsRecords: 0, sites: 0, certificates: 0, operations: 0, renewal: '由 sslctl 管理' })
+const dns = ref([])
+const sites = ref([])
+const certificates = ref([])
+const showDnsForm = ref(false)
+const showSiteForm = ref(false)
+const dnsForm = ref({ host: '', type: 'A', value: '', ttl: 600 })
+const siteForm = ref({ domain: '', upstream: '127.0.0.1:3000', certificate: 'askcode-wildcard' })
+
+const nav = [
+  { id: 'overview', label: '总览', icon: LayoutDashboard },
+  { id: 'dns', label: 'DNS 解析', icon: Globe2 },
+  { id: 'certificates', label: 'SSL 证书', icon: ShieldCheck },
+  { id: 'sites', label: 'Nginx 站点', icon: Server },
+  { id: 'operations', label: '操作记录', icon: Activity }
+]
+const title = computed(() => nav.find(x => x.id === page.value)?.label || '总览')
+
+async function api(path, options = {}) { const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options }); if (response.status === 401) { authenticated.value = false; throw new Error('登录已失效') }; if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || '请求失败') }; return response.json() }
+async function load() { loading.value = true; try { overview.value = await api('/api/overview'); dns.value = await api('/api/dns'); sites.value = await api('/api/sites'); certificates.value = await api('/api/certificates') } finally { loading.value = false } }
+async function checkSession() { const state = await api('/api/session'); authenticated.value = state.authenticated; if (authenticated.value) await load() }
+async function login() { loginError.value = ''; try { await api('/api/login', { method: 'POST', body: JSON.stringify({ code: code.value }) }); authenticated.value = true; code.value = ''; await load() } catch (e) { loginError.value = e.message } }
+async function logout() { await api('/api/logout', { method: 'POST' }); authenticated.value = false }
+async function addDns() { try { await api('/api/dns', { method: 'POST', body: JSON.stringify(dnsForm.value) }); showDnsForm.value = false; dnsForm.value = { host: '', type: 'A', value: '', ttl: 600 }; await load() } catch (e) { alert(e.message) } }
+async function syncDns() { loading.value = true; try { await api('/api/dns-sync', { method: 'POST' }); dns.value = await api('/api/dns') } catch (e) { alert(e.message) } finally { loading.value = false } }
+async function deleteDns(id) { if (!confirm('确认删除这条 DNS 记录？')) return; await api(`/api/dns?id=${id}`, { method: 'DELETE' }); await load() }
+async function addSite() { try { await api('/api/sites', { method: 'POST', body: JSON.stringify(siteForm.value) }); showSiteForm.value = false; siteForm.value = { domain: '', upstream: '127.0.0.1:3000', certificate: 'askcode-wildcard' }; await load() } catch (e) { alert(e.message) } }
+onMounted(checkSession)
+</script>
+
+<template>
+  <main v-if="!authenticated" class="login-shell">
+    <section class="login-panel"><div class="brand-mark"><ShieldCheck :size="22" /></div><p class="eyebrow">SSL OPERATIONS</p><h1>管理后台</h1><p class="muted">管理 DNS 解析与 Nginx 证书绑定</p><form @submit.prevent="login"><label for="code">授权码</label><input id="code" v-model="code" type="password" autocomplete="current-password" placeholder="请输入部署后配置的授权码" autofocus/><p v-if="loginError" class="form-error">{{ loginError }}</p><button class="primary full" type="submit">进入后台 <ArrowRight :size="16" /></button></form></section>
+  </main>
+  <div v-else class="app-shell">
+    <aside class="sidebar"><div class="brand"><div class="brand-mark"><ShieldCheck :size="20" /></div><div><strong>SSL Admin</strong><span>ECS 控制台</span></div></div><nav><button v-for="item in nav" :key="item.id" :class="['nav-item', { active: page === item.id }]" @click="page = item.id"><component :is="item.icon" :size="17"/> {{ item.label }}</button></nav><div class="sidebar-bottom"><div class="system-pill"><span class="status-dot"></span><span>ECS 在线</span></div><button class="nav-item" @click="logout"><LogOut :size="17"/>退出登录</button></div></aside>
+    <section class="content"><header class="topbar"><div><p class="eyebrow">SSL OPERATIONS / ADMIN</p><h1>{{ title }}</h1></div><button class="icon-button" title="刷新数据" aria-label="刷新数据" @click="load"><RefreshCw :size="18" :class="{ spin: loading }"/></button></header>
+      <div v-if="page === 'overview'" class="page"><div class="metric-grid"><article class="metric"><span>DNS 记录</span><strong>{{ overview.dnsRecords }}</strong><small>由后台管理</small></article><article class="metric"><span>Nginx 站点</span><strong>{{ overview.sites }}</strong><small>已启用站点</small></article><article class="metric"><span>SSL 证书</span><strong>{{ overview.certificates }}</strong><small>由 sslctl 管理</small></article><article class="metric"><span>操作记录</span><strong>{{ overview.operations }}</strong><small>累计变更</small></article></div><div class="section-grid"><section class="panel"><div class="panel-head"><div><p class="eyebrow">SYSTEM</p><h2>运行状态</h2></div><span class="tag success"><CheckCircle2 :size="14"/>正常</span></div><div class="status-list"><div><span>自动续签</span><b>{{ overview.renewal }}</b></div><div><span>证书部署</span><b>通过 sslctl 执行</b></div><div><span>Nginx 配置检查</span><b>保存前执行 nginx -t</b></div></div></section><section class="panel"><div class="panel-head"><div><p class="eyebrow">QUICK ACTIONS</p><h2>快捷操作</h2></div></div><div class="quick-actions"><button @click="page = 'dns'">管理 DNS <ArrowRight :size="15"/></button><button @click="page = 'sites'">绑定站点证书 <ArrowRight :size="15"/></button><button @click="page = 'certificates'">查看 SSL <ArrowRight :size="15"/></button></div></section></div></div>
+      <div v-else-if="page === 'dns'" class="page"><div class="toolbar"><div><p class="muted">askcode.cn</p><h2>DNS 记录</h2></div><div class="toolbar-actions"><button class="secondary" :disabled="loading" @click="syncDns"><RefreshCw :size="16" :class="{ spin: loading }"/>从阿里云同步</button><button class="primary" @click="showDnsForm = true"><Plus :size="16"/>新增解析</button></div></div><section class="panel table-panel"><table><thead><tr><th>主机记录</th><th>类型</th><th>记录值</th><th>TTL</th><th>操作</th></tr></thead><tbody><tr v-for="item in dns" :key="item.id"><td class="mono">{{ item.host }}</td><td><span class="type-tag">{{ item.type }}</span></td><td class="mono">{{ item.value }}</td><td>{{ item.ttl }}</td><td><button class="danger-ghost" @click="deleteDns(item.id)"><Trash2 :size="15"/>删除</button></td></tr><tr v-if="!dns.length"><td colspan="5" class="empty">暂无 DNS 记录</td></tr></tbody></table></section></div>
+      <div v-else-if="page === 'certificates'" class="page"><div class="toolbar"><div><p class="muted">续签由 sslctl 负责</p><h2>SSL 证书</h2></div><button class="secondary" @click="load"><RefreshCw :size="16"/>刷新状态</button></div><section class="panel table-panel"><table><thead><tr><th>证书</th><th>覆盖域名</th><th>签发机构</th><th>状态</th><th>管理方</th></tr></thead><tbody><tr v-for="item in certificates" :key="item.name"><td><strong>{{ item.name }}</strong></td><td class="mono">{{ item.domains.join(', ') }}</td><td>{{ item.issuer }}</td><td><span class="tag warning"><XCircle :size="14"/>{{ item.status }}</span></td><td>{{ item.managedBy }}</td></tr></tbody></table></section></div>
+      <div v-else-if="page === 'sites'" class="page"><div class="toolbar"><div><p class="muted">需先存在 DNS 解析，后台会生成并校验 Nginx 配置</p><h2>站点绑定</h2></div><button class="primary" @click="showSiteForm = true"><Plus :size="16"/>新增站点</button></div><section class="panel table-panel"><table><thead><tr><th>域名</th><th>上游地址</th><th>SSL 证书</th><th>状态</th></tr></thead><tbody><tr v-for="item in sites" :key="item.id"><td class="mono">{{ item.domain }}</td><td class="mono">{{ item.upstream }}</td><td class="mono">{{ item.certificate }}</td><td><span class="tag success"><CheckCircle2 :size="14"/>已启用</span></td></tr><tr v-if="!sites.length"><td colspan="4" class="empty">暂无 Nginx 站点</td></tr></tbody></table></section></div>
+      <div v-else class="page"><section class="panel empty-panel"><Activity :size="28"/><h2>操作记录</h2><p class="muted">DNS 和站点变更记录会显示在这里。</p></section></div>
+    </section>
+    <div v-if="showDnsForm || showSiteForm" class="modal-backdrop" @click.self="showDnsForm = false; showSiteForm = false"><section class="modal"><div class="panel-head"><div><p class="eyebrow">{{ showDnsForm ? 'DNS RECORD' : 'NGINX SITE' }}</p><h2>{{ showDnsForm ? '新增解析' : '新增站点' }}</h2></div><button class="icon-button" aria-label="关闭" @click="showDnsForm = false; showSiteForm = false">×</button></div><form v-if="showDnsForm" @submit.prevent="addDns"><label>主机记录<input v-model="dnsForm.host" required placeholder="例如 resume"/></label><label>记录类型<select v-model="dnsForm.type"><option>A</option><option>AAAA</option><option>CNAME</option><option>TXT</option></select></label><label>记录值<input v-model="dnsForm.value" required placeholder="例如 ECS 公网地址"/></label><label>TTL<input v-model.number="dnsForm.ttl" type="number" min="60" required/></label><button class="primary full" type="submit">保存解析</button></form><form v-else @submit.prevent="addSite"><label>域名<input v-model="siteForm.domain" required placeholder="resume.askcode.cn"/></label><label>上游地址<input v-model="siteForm.upstream" required placeholder="127.0.0.1:3000"/></label><label>SSL 证书名称<input v-model="siteForm.certificate" required placeholder="askcode-wildcard"/></label><button class="primary full" type="submit">生成并绑定</button></form></section></div>
+  </div>
+</template>

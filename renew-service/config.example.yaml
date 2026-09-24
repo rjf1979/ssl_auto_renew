@@ -1,0 +1,25 @@
+ca:
+  directory_url: https://acme-staging-v02.api.letsencrypt.org/directory
+  email: admin@example.com
+  account_key: /etc/ssl-auto-renew/secrets/account.key
+
+storage:
+  data_dir: /var/lib/ssl-auto-renew
+  certificate_dir: /etc/ssl-auto-renew/certs
+
+certificates:
+  - name: example-com
+    domains:
+      - example.com
+      - '*.example.com'
+    challenge: dns-01
+    dns_provider: alidns
+    key_type: ecdsa
+    renew_before_days: 30
+    deploy:
+      fullchain_file: /etc/nginx/ssl/example.com/fullchain.pem
+      key_file: /etc/nginx/ssl/example.com/privkey.pem
+      reload_command: nginx -t && systemctl reload nginx
+
+notifications:
+  webhook_url_env: SSL_RENEW_WEBHOOK_URL

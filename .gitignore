@@ -1,0 +1,25 @@
+# Local configuration and credentials
+config.yaml
+.env
+.env.*
+deploy.env
+secrets/
+
+# Go build and tooling output
+bin/
+.tools/
+*.exe
+*.test
+
+# Runtime data and generated certificates
+data/
+certs/
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
