@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/x509"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"log/slog"
 	"net/http"
 	"os"
@@ -377,7 +379,60 @@ func normalizeUpstream(value string) string {
 	return "http://" + value
 }
 func (a *app) certificates(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, []map[string]any{{"name": "askcode.cn wildcard", "domains": []string{"*.askcode.cn"}, "issuer": "Let's Encrypt", "status": "待配置", "remainingDays": 0, "managedBy": "sslctl"}})
+	items := []map[string]any{}
+	seen := map[string]bool{}
+	certificateDir := getenv("SSL_CERTIFICATE_DIR", "/etc/ssl-auto-renew/certs")
+	if entries, err := os.ReadDir(certificateDir); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			path := filepath.Join(certificateDir, entry.Name(), "current", "fullchain.pem")
+			if item, ok := certificateInfo(entry.Name(), []string{entry.Name()}, path, "sslctl"); ok {
+				items = append(items, item)
+				seen[path] = true
+			}
+		}
+	}
+	if sites, err := a.nginx.List(); err == nil {
+		for _, site := range sites {
+			if site.Fullchain == "" || seen[site.Fullchain] {
+				continue
+			}
+			if item, ok := certificateInfo(site.Certificate, []string{site.Domain}, site.Fullchain, "Nginx 本地配置"); ok {
+				items = append(items, item)
+				seen[site.Fullchain] = true
+			}
+		}
+	}
+	writeJSON(w, items)
+}
+
+func certificateInfo(name string, domains []string, path, managedBy string) (map[string]any, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]any{"name": name, "domains": domains, "issuer": "", "status": "文件缺失", "remainingDays": 0, "managedBy": managedBy, "fullchain": path}, false
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return map[string]any{"name": name, "domains": domains, "issuer": "", "status": "证书格式错误", "remainingDays": 0, "managedBy": managedBy, "fullchain": path}, true
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return map[string]any{"name": name, "domains": domains, "issuer": "", "status": "证书格式错误", "remainingDays": 0, "managedBy": managedBy, "fullchain": path}, true
+	}
+	days := int(time.Until(cert.NotAfter).Hours() / 24)
+	status := "有效"
+	if days < 0 {
+		status = "已过期"
+	} else if days <= 30 {
+		status = "即将到期"
+	}
+	issuer := cert.Issuer.CommonName
+	if issuer == "" && len(cert.Issuer.Organization) > 0 {
+		issuer = cert.Issuer.Organization[0]
+	}
+	return map[string]any{"name": name, "domains": domains, "issuer": issuer, "status": status, "remainingDays": days, "managedBy": managedBy, "fullchain": path}, true
 }
 func (a *app) log(action, target string) {
 	_, _ = a.db.Exec("INSERT INTO operations(action,target,result,created_at) VALUES(?,?,?,?)", action, target, "success", time.Now().UTC().Format(time.RFC3339))

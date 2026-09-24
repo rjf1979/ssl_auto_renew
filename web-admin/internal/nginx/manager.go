@@ -20,6 +20,7 @@ type Site struct {
 	Domain      string
 	Upstream    string
 	Certificate string
+	Fullchain   string
 }
 
 var (
@@ -50,7 +51,8 @@ func (m *Manager) List() ([]Site, error) {
 		}
 		for _, block := range serverBlocks(data) {
 			upstream := firstDirective(proxyPassExpr, block)
-			certificate := certificateName(firstDirective(certificateExpr, block))
+			fullchain := firstDirective(certificateExpr, block)
+			certificate := certificateName(fullchain)
 			for _, match := range serverNameExpr.FindAllSubmatch(block, -1) {
 				for _, domain := range strings.Fields(string(match[1])) {
 					if domain == "_" || strings.HasPrefix(domain, "~") || !safeName.MatchString(domain) {
@@ -63,6 +65,9 @@ func (m *Manager) List() ([]Site, error) {
 					}
 					if certificate != "" {
 						current.Certificate = certificate
+					}
+					if fullchain != "" {
+						current.Fullchain = fullchain
 					}
 					byDomain[domain] = current
 				}
