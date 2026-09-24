@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,11 +33,17 @@ type app struct {
 
 type dnsRecord struct {
 	ID         int64  `json:"id"`
+	Domain     string `json:"domain"`
 	ProviderID string `json:"providerId,omitempty"`
 	Host       string `json:"host"`
 	Type       string `json:"type"`
 	Value      string `json:"value"`
 	TTL        int    `json:"ttl"`
+}
+type managedDomain struct {
+	ID      int64  `json:"id"`
+	Domain  string `json:"domain"`
+	Enabled bool   `json:"enabled"`
 }
 type site struct {
 	ID          int64  `json:"id"`
@@ -68,6 +75,7 @@ func main() {
 	mux.HandleFunc("/api/logout", a.logout)
 	mux.HandleFunc("/api/session", a.session)
 	mux.HandleFunc("/api/overview", a.protected(a.overview))
+	mux.HandleFunc("/api/domains", a.protected(a.domains))
 	mux.HandleFunc("/api/dns", a.protected(a.dns))
 	mux.HandleFunc("/api/dns-sync", a.protected(a.syncDNS))
 	mux.HandleFunc("/api/sites", a.protected(a.sites))
@@ -84,11 +92,84 @@ func main() {
 
 func initDB(db *sql.DB) error {
 	_, err := db.Exec(`PRAGMA journal_mode=WAL;
-CREATE TABLE IF NOT EXISTS dns_records (id INTEGER PRIMARY KEY AUTOINCREMENT, host TEXT NOT NULL, type TEXT NOT NULL, value TEXT NOT NULL, ttl INTEGER NOT NULL DEFAULT 600);
+CREATE TABLE IF NOT EXISTS domains (id INTEGER PRIMARY KEY AUTOINCREMENT, domain TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS dns_records (id INTEGER PRIMARY KEY AUTOINCREMENT, domain TEXT NOT NULL DEFAULT '', host TEXT NOT NULL, type TEXT NOT NULL, value TEXT NOT NULL, ttl INTEGER NOT NULL DEFAULT 600);
 CREATE TABLE IF NOT EXISTS sites (id INTEGER PRIMARY KEY AUTOINCREMENT, domain TEXT NOT NULL UNIQUE, upstream TEXT NOT NULL, certificate TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS operations (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, target TEXT NOT NULL, result TEXT NOT NULL, created_at TEXT NOT NULL);`)
 	_, _ = db.Exec("ALTER TABLE dns_records ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE dns_records ADD COLUMN domain TEXT NOT NULL DEFAULT ''")
+	base := getenv("ALI_DNS_DOMAIN", "askcode.cn")
+	for _, domain := range configuredDomains() {
+		_, _ = db.Exec("INSERT OR IGNORE INTO domains(domain,enabled) VALUES(?,1)", domain)
+	}
+	_, _ = db.Exec("UPDATE dns_records SET domain=? WHERE domain=''", base)
 	return err
+}
+
+func configuredDomains() []string {
+	values := []string{getenv("ALI_DNS_DOMAIN", "askcode.cn")}
+	values = append(values, strings.Split(os.Getenv("ALI_DNS_DOMAINS"), ",")...)
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		domain := strings.ToLower(strings.TrimSpace(value))
+		if domain != "" && validDomain(domain) && !seen[domain] {
+			seen[domain] = true
+			out = append(out, domain)
+		}
+	}
+	return out
+}
+
+var domainPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
+
+func validDomain(domain string) bool {
+	return domainPattern.MatchString(domain) && !strings.Contains(domain, "..")
+}
+
+func (a *app) domains(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rows, err := a.db.Query("SELECT id,domain,enabled FROM domains ORDER BY domain")
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		defer rows.Close()
+		out := []managedDomain{}
+		for rows.Next() {
+			var item managedDomain
+			var enabled int
+			if rows.Scan(&item.ID, &item.Domain, &enabled) == nil {
+				item.Enabled = enabled == 1
+				out = append(out, item)
+			}
+		}
+		writeJSON(w, out)
+	case http.MethodPost:
+		var input struct {
+			Domain string `json:"domain"`
+		}
+		if json.NewDecoder(r.Body).Decode(&input) != nil {
+			http.Error(w, `{"error":"域名格式不正确"}`, 400)
+			return
+		}
+		domain := strings.ToLower(strings.TrimSpace(input.Domain))
+		if !validDomain(domain) {
+			http.Error(w, `{"error":"请输入有效的根域名，例如 example.com"}`, 400)
+			return
+		}
+		result, err := a.db.Exec("INSERT INTO domains(domain,enabled) VALUES(?,1)", domain)
+		if err != nil {
+			http.Error(w, "域名已存在或保存失败", 409)
+			return
+		}
+		id, _ := result.LastInsertId()
+		a.log("domain.create", domain)
+		writeJSON(w, managedDomain{ID: id, Domain: domain, Enabled: true})
+	default:
+		methodNotAllowed(w)
+	}
 }
 
 func (a *app) login(w http.ResponseWriter, r *http.Request) {
@@ -159,7 +240,14 @@ func (a *app) overview(w http.ResponseWriter, r *http.Request) {
 func (a *app) dns(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		rows, err := a.db.Query("SELECT id,provider_id,host,type,value,ttl FROM dns_records ORDER BY id DESC")
+		domain := strings.TrimSpace(r.URL.Query().Get("domain"))
+		query := "SELECT id,domain,provider_id,host,type,value,ttl FROM dns_records ORDER BY id DESC"
+		args := []any{}
+		if domain != "" {
+			query = "SELECT id,domain,provider_id,host,type,value,ttl FROM dns_records WHERE domain=? ORDER BY id DESC"
+			args = append(args, domain)
+		}
+		rows, err := a.db.Query(query, args...)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -168,7 +256,7 @@ func (a *app) dns(w http.ResponseWriter, r *http.Request) {
 		out := []dnsRecord{}
 		for rows.Next() {
 			var x dnsRecord
-			_ = rows.Scan(&x.ID, &x.ProviderID, &x.Host, &x.Type, &x.Value, &x.TTL)
+			_ = rows.Scan(&x.ID, &x.Domain, &x.ProviderID, &x.Host, &x.Type, &x.Value, &x.TTL)
 			out = append(out, x)
 		}
 		writeJSON(w, out)
@@ -181,7 +269,14 @@ func (a *app) dns(w http.ResponseWriter, r *http.Request) {
 		if x.TTL == 0 {
 			x.TTL = 600
 		}
-		provider, err := alidns.New()
+		if x.Domain == "" {
+			x.Domain = getenv("ALI_DNS_DOMAIN", "askcode.cn")
+		}
+		if !a.isManagedDomain(x.Domain) {
+			http.Error(w, `{"error":"请先添加并管理该根域名"}`, http.StatusConflict)
+			return
+		}
+		provider, err := alidns.New(x.Domain)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
@@ -191,7 +286,7 @@ func (a *app) dns(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		res, err := a.db.Exec("INSERT INTO dns_records(provider_id,host,type,value,ttl) VALUES(?,?,?,?,?)", providerID, x.Host, x.Type, x.Value, x.TTL)
+		res, err := a.db.Exec("INSERT INTO dns_records(domain,provider_id,host,type,value,ttl) VALUES(?,?,?,?,?,?)", x.Domain, providerID, x.Host, x.Type, x.Value, x.TTL)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -201,12 +296,12 @@ func (a *app) dns(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, x)
 	case http.MethodDelete:
 		id, _ := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
-		var providerID string
-		if err := a.db.QueryRow("SELECT provider_id FROM dns_records WHERE id=?", id).Scan(&providerID); err != nil {
+		var providerID, domain string
+		if err := a.db.QueryRow("SELECT provider_id,domain FROM dns_records WHERE id=?", id).Scan(&providerID, &domain); err != nil {
 			http.Error(w, "DNS 记录不存在", http.StatusNotFound)
 			return
 		}
-		provider, err := alidns.New()
+		provider, err := alidns.New(domain)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
@@ -232,7 +327,15 @@ func (a *app) syncDNS(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	provider, err := alidns.New()
+	domain := strings.TrimSpace(r.URL.Query().Get("domain"))
+	if domain == "" {
+		domain = getenv("ALI_DNS_DOMAIN", "askcode.cn")
+	}
+	if !a.isManagedDomain(domain) {
+		http.Error(w, `{"error":"请先添加并管理该根域名"}`, http.StatusConflict)
+		return
+	}
+	provider, err := alidns.New(domain)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -248,12 +351,12 @@ func (a *app) syncDNS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	if _, err = tx.Exec("DELETE FROM dns_records"); err != nil {
+	if _, err = tx.Exec("DELETE FROM dns_records WHERE domain=?", domain); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
 	for _, item := range records {
-		if _, err = tx.Exec("INSERT INTO dns_records(provider_id,host,type,value,ttl) VALUES(?,?,?,?,?)", item.ProviderID, item.Host, item.Type, item.Value, item.TTL); err != nil {
+		if _, err = tx.Exec("INSERT INTO dns_records(domain,provider_id,host,type,value,ttl) VALUES(?,?,?,?,?,?)", domain, item.ProviderID, item.Host, item.Type, item.Value, item.TTL); err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
@@ -262,7 +365,7 @@ func (a *app) syncDNS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	a.log("dns.sync", "askcode.cn")
+	a.log("dns.sync", domain)
 	writeJSON(w, map[string]any{"count": len(records), "records": records})
 }
 
@@ -359,17 +462,31 @@ ON CONFLICT(domain) DO UPDATE SET upstream=excluded.upstream,certificate=exclude
 }
 
 func (a *app) dnsMatchesDomain(domain string) bool {
-	base := getenv("ALI_DNS_DOMAIN", "askcode.cn")
+	var base string
+	if rows, err := a.db.Query("SELECT domain FROM domains WHERE enabled=1"); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var candidate string
+			if rows.Scan(&candidate) == nil && (domain == candidate || strings.HasSuffix(domain, "."+candidate)) && len(candidate) > len(base) {
+				base = candidate
+			}
+		}
+	}
+	if base == "" || !a.isManagedDomain(base) {
+		return false
+	}
 	host := "@"
 	if domain != base {
-		if !strings.HasSuffix(domain, "."+base) {
-			return false
-		}
 		host = strings.TrimSuffix(domain, "."+base)
 	}
 	var count int
-	_ = a.db.QueryRow("SELECT count(*) FROM dns_records WHERE host=? AND type IN ('A','AAAA','CNAME')", host).Scan(&count)
+	_ = a.db.QueryRow("SELECT count(*) FROM dns_records WHERE domain=? AND host=? AND type IN ('A','AAAA','CNAME')", base, host).Scan(&count)
 	return count > 0
+}
+
+func (a *app) isManagedDomain(domain string) bool {
+	var enabled int
+	return a.db.QueryRow("SELECT enabled FROM domains WHERE domain=?", strings.ToLower(strings.TrimSpace(domain))).Scan(&enabled) == nil && enabled == 1
 }
 
 func normalizeUpstream(value string) string {

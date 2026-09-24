@@ -2,3 +2,4 @@
 /* DNS toolbar actions stay grouped on wide screens and stack on phones. */
 .toolbar-actions{display:flex;gap:8px;align-items:center}
 @media(max-width:480px){.toolbar-actions{width:100%;flex-direction:column}.toolbar-actions>button{width:100%}}
+.domain-select{min-height:40px;padding:0 12px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink)}

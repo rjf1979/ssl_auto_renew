@@ -24,7 +24,7 @@ type Client struct {
 	domain string
 }
 
-func New() (*Client, error) {
+func New(domain string) (*Client, error) {
 	role := getenv("ALICLOUD_RAM_ROLE", "resume-askcode")
 	region := getenv("ALICLOUD_REGION_ID", "cn-hangzhou")
 	cred, err := credentials.NewCredential(new(credentials.Config).SetType("ecs_ram_role").SetRoleName(role))
@@ -36,7 +36,7 @@ func New() (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create AliDNS client: %w", err)
 	}
-	return &Client{client: client, domain: getenv("ALI_DNS_DOMAIN", "askcode.cn")}, nil
+	return &Client{client: client, domain: domain}, nil
 }
 
 func (c *Client) List(ctx context.Context) ([]Record, error) {
