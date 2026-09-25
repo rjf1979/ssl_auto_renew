@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -47,14 +48,15 @@ type managedDomain struct {
 	Enabled bool   `json:"enabled"`
 }
 type certificateRequest struct {
-	ID              int64    `json:"id"`
-	Name            string   `json:"name"`
-	Domains         []string `json:"domains"`
-	Challenge       string   `json:"challenge"`
-	DNSProvider     string   `json:"dnsProvider"`
-	KeyType         string   `json:"keyType"`
-	RenewBeforeDays int      `json:"renewBeforeDays"`
-	Enabled         bool     `json:"enabled"`
+	ID               int64    `json:"id"`
+	Name             string   `json:"name"`
+	Domains          []string `json:"domains"`
+	Challenge        string   `json:"challenge"`
+	DNSProvider      string   `json:"dnsProvider"`
+	KeyType          string   `json:"keyType"`
+	RenewBeforeDays  int      `json:"renewBeforeDays"`
+	Enabled          bool     `json:"enabled"`
+	RenewalTriggered bool     `json:"renewalTriggered"`
 }
 type site struct {
 	ID          int64  `json:"id"`
@@ -556,6 +558,7 @@ func (a *app) certificates(w http.ResponseWriter, r *http.Request) {
 		}
 		a.log("certificate.create", input.Name)
 		input.Enabled = true
+		input.RenewalTriggered = a.triggerRenewal(r.Context())
 		writeJSON(w, input)
 		return
 	}
@@ -613,6 +616,19 @@ func (a *app) certificates(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, items)
+}
+
+func (a *app) triggerRenewal(parent context.Context) bool {
+	if strings.EqualFold(getenv("RENEW_TRIGGER_ENABLED", "true"), "false") {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	if err := exec.CommandContext(ctx, "systemctl", "start", "ssl-auto-renew.service").Run(); err != nil {
+		slog.Warn("immediate certificate renewal trigger failed", "error", err)
+		return false
+	}
+	return true
 }
 
 var certificateNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
