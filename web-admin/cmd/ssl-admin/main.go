@@ -20,6 +20,7 @@ import (
 
 	"github.com/example/ssl-admin/internal/alidns"
 	"github.com/example/ssl-admin/internal/nginx"
+	"gopkg.in/yaml.v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -44,6 +45,16 @@ type managedDomain struct {
 	ID      int64  `json:"id"`
 	Domain  string `json:"domain"`
 	Enabled bool   `json:"enabled"`
+}
+type certificateRequest struct {
+	ID              int64    `json:"id"`
+	Name            string   `json:"name"`
+	Domains         []string `json:"domains"`
+	Challenge       string   `json:"challenge"`
+	DNSProvider     string   `json:"dnsProvider"`
+	KeyType         string   `json:"keyType"`
+	RenewBeforeDays int      `json:"renewBeforeDays"`
+	Enabled         bool     `json:"enabled"`
 }
 type site struct {
 	ID          int64  `json:"id"`
@@ -95,6 +106,7 @@ func initDB(db *sql.DB) error {
 CREATE TABLE IF NOT EXISTS domains (id INTEGER PRIMARY KEY AUTOINCREMENT, domain TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS dns_records (id INTEGER PRIMARY KEY AUTOINCREMENT, domain TEXT NOT NULL DEFAULT '', host TEXT NOT NULL, type TEXT NOT NULL, value TEXT NOT NULL, ttl INTEGER NOT NULL DEFAULT 600);
 CREATE TABLE IF NOT EXISTS sites (id INTEGER PRIMARY KEY AUTOINCREMENT, domain TEXT NOT NULL UNIQUE, upstream TEXT NOT NULL, certificate TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS certificate_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, domains_json TEXT NOT NULL, challenge TEXT NOT NULL, dns_provider TEXT NOT NULL, key_type TEXT NOT NULL, renew_before_days INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS operations (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, target TEXT NOT NULL, result TEXT NOT NULL, created_at TEXT NOT NULL);`)
 	_, _ = db.Exec("ALTER TABLE dns_records ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE dns_records ADD COLUMN domain TEXT NOT NULL DEFAULT ''")
@@ -496,6 +508,52 @@ func normalizeUpstream(value string) string {
 	return "http://" + value
 }
 func (a *app) certificates(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		var input certificateRequest
+		if json.NewDecoder(r.Body).Decode(&input) != nil || !certificateNamePattern.MatchString(input.Name) || len(input.Domains) == 0 {
+			http.Error(w, `{"error":"请填写证书名称和至少一个域名"}`, 400)
+			return
+		}
+		for i, domain := range input.Domains {
+			input.Domains[i] = strings.ToLower(strings.TrimSpace(domain))
+			if !validCertificateDomain(input.Domains[i]) {
+				http.Error(w, `{"error":"证书域名格式不正确"}`, 400)
+				return
+			}
+		}
+		if input.Challenge == "" {
+			input.Challenge = "dns-01"
+		}
+		if input.DNSProvider == "" {
+			input.DNSProvider = "alidns"
+		}
+		if input.KeyType == "" {
+			input.KeyType = "ecdsa"
+		}
+		if input.RenewBeforeDays == 0 {
+			input.RenewBeforeDays = 30
+		}
+		domainsJSON, _ := json.Marshal(input.Domains)
+		result, err := a.db.Exec(`INSERT INTO certificate_requests(name,domains_json,challenge,dns_provider,key_type,renew_before_days,enabled) VALUES(?,?,?,?,?,?,1)`, input.Name, string(domainsJSON), input.Challenge, input.DNSProvider, input.KeyType, input.RenewBeforeDays)
+		if err != nil {
+			http.Error(w, "证书名称已存在或保存失败", http.StatusConflict)
+			return
+		}
+		input.ID, _ = result.LastInsertId()
+		if err := a.writeCertificateManifest(); err != nil {
+			_, _ = a.db.Exec("DELETE FROM certificate_requests WHERE id=?", input.ID)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		a.log("certificate.create", input.Name)
+		input.Enabled = true
+		writeJSON(w, input)
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
 	items := []map[string]any{}
 	seen := map[string]bool{}
 	certificateDir := getenv("SSL_CERTIFICATE_DIR", "/etc/ssl-auto-renew/certs")
@@ -522,7 +580,95 @@ func (a *app) certificates(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	rows, err := a.db.Query("SELECT id,name,domains_json,challenge,dns_provider,key_type,renew_before_days,enabled FROM certificate_requests WHERE enabled=1 ORDER BY name")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var request certificateRequest
+			var domainsJSON string
+			var enabled int
+			if rows.Scan(&request.ID, &request.Name, &domainsJSON, &request.Challenge, &request.DNSProvider, &request.KeyType, &request.RenewBeforeDays, &enabled) != nil {
+				continue
+			}
+			_ = json.Unmarshal([]byte(domainsJSON), &request.Domains)
+			found := false
+			for _, item := range items {
+				if item["name"] == request.Name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				items = append(items, map[string]any{"name": request.Name, "domains": request.Domains, "issuer": "", "status": "待申请", "remainingDays": 0, "managedBy": "sslctl", "request": request})
+			}
+		}
+	}
 	writeJSON(w, items)
+}
+
+var certificateNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
+func validCertificateDomain(domain string) bool {
+	if strings.HasPrefix(domain, "*.") {
+		domain = strings.TrimPrefix(domain, "*.")
+	}
+	return validDomain(domain)
+}
+
+func (a *app) writeCertificateManifest() error {
+	rows, err := a.db.Query("SELECT name,domains_json,challenge,dns_provider,key_type,renew_before_days FROM certificate_requests WHERE enabled=1 ORDER BY name")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type deployment struct {
+		FullchainFile string `yaml:"fullchain_file"`
+		KeyFile       string `yaml:"key_file"`
+		ReloadCommand string `yaml:"reload_command"`
+	}
+	type item struct {
+		Name            string     `yaml:"name"`
+		Domains         []string   `yaml:"domains"`
+		Challenge       string     `yaml:"challenge"`
+		DNSProvider     string     `yaml:"dns_provider"`
+		KeyType         string     `yaml:"key_type"`
+		RenewBeforeDays int        `yaml:"renew_before_days"`
+		Deploy          deployment `yaml:"deploy"`
+	}
+	manifest := struct {
+		Certificates []item `yaml:"certificates"`
+	}{}
+	certDir := getenv("SSL_CERTIFICATE_DIR", "/etc/ssl-auto-renew/certs")
+	for rows.Next() {
+		var name, domainsJSON, challenge, provider, keyType string
+		var renewDays int
+		if err := rows.Scan(&name, &domainsJSON, &challenge, &provider, &keyType, &renewDays); err != nil {
+			return err
+		}
+		var domains []string
+		if err := json.Unmarshal([]byte(domainsJSON), &domains); err != nil {
+			return err
+		}
+		base := filepath.Join(certDir, name, "current")
+		manifest.Certificates = append(manifest.Certificates, item{Name: name, Domains: domains, Challenge: challenge, DNSProvider: provider, KeyType: keyType, RenewBeforeDays: renewDays, Deploy: deployment{FullchainFile: filepath.Join(base, "fullchain.pem"), KeyFile: filepath.Join(base, "privkey.pem"), ReloadCommand: "nginx -t && systemctl reload nginx"}})
+	}
+	data, err := yaml.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	path := getenv("SSL_CERTIFICATE_MANIFEST", "/etc/ssl-auto-renew/certificates.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0640); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func certificateInfo(name string, domains []string, path, managedBy string) (map[string]any, bool) {

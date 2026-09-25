@@ -9,6 +9,7 @@ require (
 	github.com/alibabacloud-go/tea v1.4.0
 	github.com/aliyun/credentials-go v1.4.7
 	github.com/go-acme/alidns-20150109/v4 v4.7.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

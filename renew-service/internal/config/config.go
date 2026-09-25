@@ -11,10 +11,11 @@ import (
 )
 
 type Config struct {
-	CA            CAConfig           `yaml:"ca"`
-	Storage       StorageConfig      `yaml:"storage"`
-	Certificates  []Certificate      `yaml:"certificates"`
-	Notifications NotificationConfig `yaml:"notifications"`
+	CA                  CAConfig           `yaml:"ca"`
+	Storage             StorageConfig      `yaml:"storage"`
+	CertificateManifest string             `yaml:"certificate_manifest"`
+	Certificates        []Certificate      `yaml:"certificates"`
+	Notifications       NotificationConfig `yaml:"notifications"`
 }
 
 type CAConfig struct {
@@ -52,6 +53,19 @@ func Load(path string) (Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
+	}
+	if cfg.CertificateManifest != "" {
+		manifestData, err := os.ReadFile(cfg.CertificateManifest)
+		if err != nil {
+			return Config{}, fmt.Errorf("read certificate manifest: %w", err)
+		}
+		var manifest struct {
+			Certificates []Certificate `yaml:"certificates"`
+		}
+		if err := yaml.Unmarshal(manifestData, &manifest); err != nil {
+			return Config{}, fmt.Errorf("parse certificate manifest: %w", err)
+		}
+		cfg.Certificates = manifest.Certificates
 	}
 	return cfg, nil
 }

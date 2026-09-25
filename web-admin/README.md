@@ -31,4 +31,6 @@ go run ./cmd/ssl-admin
 
 后台的“域名管理”维护多个 AliDNS 根域名。DNS 记录会保存所属根域名，并按当前选择的域名单独同步；历史 `ALI_DNS_DOMAIN` 会在首次升级时自动迁移。
 
+“申请证书”会把证书申请记录写入 SQLite，并生成 `/etc/ssl-auto-renew/certificates.yaml`。`renew-service` 读取该清单执行 ACME 申请和自动续签，后台不直接执行 ACME。
+
 授权码只从 `admin.env` 读取，不写入 SQLite。生产环境应使用随机长字符串，并将配置文件权限限制为 `0640`。
