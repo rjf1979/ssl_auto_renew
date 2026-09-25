@@ -3,3 +3,4 @@
 .toolbar-actions{display:flex;gap:8px;align-items:center}
 @media(max-width:480px){.toolbar-actions{width:100%;flex-direction:column}.toolbar-actions>button{width:100%}}
 .domain-select{min-height:40px;padding:0 12px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink)}
+.checkbox-group{border:1px solid var(--line);border-radius:6px;padding:12px}.checkbox-group legend{padding:0 4px;font-size:13px;font-weight:600}.checkbox-group label{display:flex;grid-template-columns:none;align-items:center;gap:8px;margin:9px 0;font-weight:400}.checkbox-group input{width:16px;height:16px}

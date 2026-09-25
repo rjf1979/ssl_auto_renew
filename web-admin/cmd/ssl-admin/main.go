@@ -417,6 +417,10 @@ func (a *app) sites(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		x.Upstream = normalizeUpstream(x.Upstream)
+		if !a.certificateRequestExists(x.Certificate) {
+			http.Error(w, `{"error":"请先在 SSL 证书页面创建该证书申请"}`, http.StatusConflict)
+			return
+		}
 		if err := a.nginx.Apply(r.Context(), x.Domain, x.Upstream, x.Certificate); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -434,6 +438,11 @@ ON CONFLICT(domain) DO UPDATE SET upstream=excluded.upstream,certificate=exclude
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+func (a *app) certificateRequestExists(name string) bool {
+	var enabled int
+	return a.db.QueryRow("SELECT enabled FROM certificate_requests WHERE name=?", name).Scan(&enabled) == nil && enabled == 1
 }
 
 func (a *app) syncNginx(w http.ResponseWriter, r *http.Request) {
@@ -516,7 +525,7 @@ func (a *app) certificates(w http.ResponseWriter, r *http.Request) {
 		}
 		for i, domain := range input.Domains {
 			input.Domains[i] = strings.ToLower(strings.TrimSpace(domain))
-			if !validCertificateDomain(input.Domains[i]) {
+			if !validCertificateDomain(input.Domains[i]) || !a.certificateDomainManaged(input.Domains[i]) {
 				http.Error(w, `{"error":"证书域名格式不正确"}`, 400)
 				return
 			}
@@ -613,6 +622,22 @@ func validCertificateDomain(domain string) bool {
 		domain = strings.TrimPrefix(domain, "*.")
 	}
 	return validDomain(domain)
+}
+
+func (a *app) certificateDomainManaged(domain string) bool {
+	base := strings.TrimPrefix(domain, "*.")
+	rows, err := a.db.Query("SELECT domain FROM domains WHERE enabled=1")
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var root string
+		if rows.Scan(&root) == nil && (base == root || strings.HasSuffix(base, "."+root)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *app) writeCertificateManifest() error {
