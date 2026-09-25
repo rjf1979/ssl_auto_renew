@@ -143,3 +143,62 @@ dig TXT _acme-challenge.example.com
 git status --short --ignored
 git diff --check
 ```
+
+## 使用 AI 辅助安装
+
+可以使用 Codex、ChatGPT 或其他代码助手协助完成构建和 ECS 部署。推荐让 AI 在项目目录中工作，并让它读取本地的忽略配置，而不是把云凭据复制到聊天窗口。
+
+### 提供给 AI 的信息
+
+可以提供以下非敏感信息：
+
+- 项目所在目录。
+- ECS 公网 IP 或域名、SSH 端口和登录用户名。
+- 远端安装目录。
+- ECS 操作系统和 CPU 架构，例如 Linux amd64。
+- 管理后台公网域名。
+- 已绑定的 ECS RAM 角色名称。
+- 是否使用 Let's Encrypt production 环境。
+
+密码、SSH 私钥、AccessKey Secret、STS Token、后台授权码、ACME 账号私钥和 SQLite 数据库不应粘贴到对话中。将这些内容放在本地 `deploy.env`、`admin.env` 或 ECS 上的受限环境文件中，并确保它们被 `.gitignore` 忽略。
+
+### 推荐提示词
+
+可以把下面的提示词交给 AI，并根据实际情况替换占位符：
+
+```text
+请在当前项目目录部署 ssl_auto_renew：
+
+1. 先阅读 README.md、renew-service/README.md 和 web-admin/README.md。
+2. 检查两个子项目的职责和目录隔离，不要合并它们的数据库或代码包。
+3. 检查 .gitignore，确认 deploy.env、*.env、数据库、证书、私钥和构建产物不会提交。
+4. 在本地分别执行 Go 测试、Vue 构建和 Linux amd64 构建。
+5. 将 renew-service 安装为 ssl-auto-renew.service，并启用 ssl-auto-renew.timer。
+6. 将 web-admin 安装为 ssl-admin.service，后台只监听 127.0.0.1。
+7. 使用 ECS RAM 角色访问 AliDNS，不要写入或回显 AccessKey、Secret、STS Token 或授权码。
+8. 发布后验证服务状态、日志、内部健康接口、证书状态、Nginx 配置和 timer。
+9. 失败时保留旧版本，先说明原因，不要删除生产数据库、证书或环境文件。
+
+部署连接信息在当前目录的 deploy.env 中，请读取变量但不要在输出中显示变量值。
+ECS 地址：<ECS 地址>
+SSH 用户：<SSH 用户>
+SSH 端口：<SSH 端口>
+RAM 角色：<RAM 角色名>
+公网域名：<管理后台域名>
+```
+
+### AI 执行后的核验
+
+让 AI 返回以下检查结果，但只返回状态、路径和错误摘要，不返回任何凭据：
+
+```bash
+systemctl is-active ssl-admin.service
+systemctl is-enabled ssl-auto-renew.timer
+systemctl is-active ssl-auto-renew.timer
+systemctl list-timers ssl-auto-renew.timer
+curl -fsS http://127.0.0.1:8080/api/session
+sslctl status --config /etc/ssl-auto-renew/config.yaml
+nginx -t
+```
+
+最后人工确认：管理后台可以登录、DNS 同步正常、证书状态有效、Nginx HTTPS 可访问，并且 `git status --short --ignored` 中没有出现敏感文件未被忽略的情况。
