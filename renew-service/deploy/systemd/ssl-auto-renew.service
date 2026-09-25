@@ -5,8 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=ssl-renew
-Group=ssl-renew
+User=root
+Group=root
+Environment=ALICLOUD_RAM_ROLE=resume-askcode
 ExecStart=/usr/local/bin/sslctl renew --config /etc/ssl-auto-renew/config.yaml
 NoNewPrivileges=true
 PrivateTmp=true

@@ -1,11 +1,11 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { Activity, ArrowRight, CheckCircle2, Globe2, KeyRound, LayoutDashboard, LogOut, Plus, RefreshCw, Server, ShieldCheck, Trash2, XCircle } from 'lucide-vue-next'
 
 const authenticated = ref(false)
 const code = ref('')
 const loginError = ref('')
-const page = ref('overview')
+const page = ref(sessionStorage.getItem('ssl-admin-page') || 'overview')
 const loading = ref(false)
 const overview = ref({ dnsRecords: 0, sites: 0, certificates: 0, operations: 0, renewal: '由 sslctl 管理' })
 const dns = ref([])
@@ -31,6 +31,7 @@ const nav = [
   { id: 'operations', label: '操作记录', icon: Activity }
 ]
 const title = computed(() => nav.find(x => x.id === page.value)?.label || '总览')
+watch(page, value => sessionStorage.setItem('ssl-admin-page', value))
 
 async function api(path, options = {}) { const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options }); if (response.status === 401) { authenticated.value = false; throw new Error('登录已失效') }; if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || '请求失败') }; return response.json() }
 async function load() { loading.value = true; try { overview.value = await api('/api/overview'); domains.value = await api('/api/domains'); if (!selectedDomain.value || !domains.value.some(item => item.domain === selectedDomain.value)) selectedDomain.value = domains.value[0]?.domain || ''; dns.value = selectedDomain.value ? await api(`/api/dns?domain=${encodeURIComponent(selectedDomain.value)}`) : []; sites.value = await api('/api/sites'); certificates.value = await api('/api/certificates'); if (!siteForm.value.certificate) siteForm.value.certificate = certificates.value[0]?.name || '' } finally { loading.value = false } }

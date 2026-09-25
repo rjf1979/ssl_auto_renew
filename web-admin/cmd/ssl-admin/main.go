@@ -702,7 +702,7 @@ func (a *app) writeCertificateManifest() error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0640); err != nil {
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
